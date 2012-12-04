@@ -7,6 +7,9 @@
 #include <malloc.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
 
 static int (*_compare) (node_t *a, node_t *b);
 
@@ -26,7 +29,7 @@ void destroy_fibonacci_heap (fibonacci_heap_t *heap) {
 void _dot (fibonacci_heap_t *heap) {
 	assert (heap != NULL);
 
-	int fd = open ("./graph", O_WRONLY | O_CREAT | O_TRUNC);
+	int fd = open ("./graph", O_RDWR | O_CREAT | O_TRUNC, 0644);
 	char *header = "digraph fibonacci_heap {\n";
 	write (fd, header, strlen (header));
 
@@ -35,39 +38,44 @@ void _dot (fibonacci_heap_t *heap) {
 	char *footer = "}\n";
 	write (fd, footer, strlen (footer));
 
+	fsync (fd);
 	close (fd);
 }
+
 
 void _visit_dot (fibonacci_heap_t *heap, node_t *node, void *arg) {
 
 	int fd = (int)arg;
 
 	char buffer[128];
-	sprintf (buffer, "%x [shape=%s, label=%d, color=%s, style=%s]\n", "box", node->key, "black", "filled");
+	sprintf (buffer, "\"%p\" [shape=%s, label=%u, color=%s, style=%s]\n", node, "box", *((int *)node->key), "grey", "filled");
 	write (fd, buffer, strlen (buffer));
 
+
 	if (node->child != NULL) {
-		sprintf (buffer, "%x -> %x\n", node, node->child);
+		sprintf (buffer, "\"%p\" -> \"%p\"\n", node, node->child);
 		write (fd, buffer, strlen (buffer));
 	}
 	if (node->left != NULL) {
-		sprintf (buffer, "%x -> %x\n", node, node->left);
+		sprintf (buffer, "\"%p\" -> \"%p\"\n", node, node->left);
 		write (fd, buffer, strlen (buffer));
 	}
 	if (node->right != NULL) {
-		sprintf (buffer, "%x -> %x\n", node, node->right);
+		sprintf (buffer, "\"%p\" -> \"%p\"\n", node, node->right);
+		write (fd, buffer, strlen (buffer));
+		sprintf (buffer, "{rank = same; \"%p\"; \"%p\"}\n", node, node->right);
 		write (fd, buffer, strlen (buffer));
 	}
 }	
 
 
-void traverse (fibonacci_heap_t *heap, void (*visit)(fibonacci_heap_t *heap, node_t *node), void *arg) {
+void traverse (fibonacci_heap_t *heap, void (*visit)(fibonacci_heap_t *heap, node_t *node, void *arg), void *arg) {
 	assert (heap != NULL && visit != NULL);
 
 	_do_traverse (heap, heap->root, visit, arg);
 }
 
-void _do_traverse (fibonacci_heap_t *heap, node_t *subroot, void (*visit)(fibonacci_heap_t *heap, node_t *node), void *arg) {
+void _do_traverse (fibonacci_heap_t *heap, node_t *subroot, void (*visit)(fibonacci_heap_t *heap, node_t *node, void *arg), void *arg) {
 	
 	// recursion ending condition
 	if (subroot == NULL)
@@ -83,7 +91,9 @@ void _do_traverse (fibonacci_heap_t *heap, node_t *subroot, void (*visit)(fibona
 	_do_traverse (heap, subroot->right, visit, arg);
 }
 
-void set_compare (int (*compare)(node_t*, node_t*));
+void set_compare (int (*compare)(node_t*, node_t*)) {
+	_compare = compare;
+}
 
 
 
@@ -95,7 +105,7 @@ int inline _key_compare (node_t *node, void *key) {
 
 int _compare_int (node_t *a, node_t *b) {
 	assert (a != NULL && b != NULL);
-	return (int)a->key - (int)b->key;
+	return *((int *)a->key) - *((int *)b->key);
 }
 
 bool inline is_empty (fibonacci_heap_t *heap) {
@@ -127,13 +137,11 @@ node_t* insert (fibonacci_heap_t *heap, void *data, void *key) {
 
 	if (is_empty (heap)) {
 		heap->min = node;
-		heap->count = 1;
 		heap->root = node;
-		return node;
+	} else {
+		// insert into root list
+		_insert_into_roots (heap, node);
 	}
-
-	// insert into root list
-	_insert_into_roots (heap, node);
 
 	// update min
 	_update_min (heap, node);
@@ -276,7 +284,7 @@ int _remove_from_children (node_t *child) {
 	node_t *parent = child->parent;
 
 	// update child
-	if (parent->child = child)
+	if (parent->child == child)
 		parent->child = child->right;
 
 	if (child->left != NULL)
@@ -332,14 +340,16 @@ void* delete_min (fibonacci_heap_t *heap) {
 	// get the min
 	node_t *node = heap->min;
 
-	// remove it from roots
+	// remove it from roots and degrees
 	_remove_from_roots (heap, node);
+	_remove_from_degrees (heap, node);
 
 	// melt children into roots
 	node_t *child = node->child;
 	while (child != NULL) {
+		node_t *next = child->right;
 		_insert_into_roots (heap, child);
-		child = child->right;
+		child = next;
 	}
 
 	// consolidate
@@ -372,6 +382,9 @@ void _consolidate (fibonacci_heap_t *heap) {
 			node_t *c = current->node;
 			node_t *n = next->node;
 
+			_remove_from_degrees (heap, c);
+			_remove_from_degrees (heap, n);
+
 			if (c->compare (c, n) <= 0) {
 				_remove_from_roots (heap, n);
 				_insert_into_children (c, n);
@@ -382,8 +395,6 @@ void _consolidate (fibonacci_heap_t *heap) {
 				_insert_into_degrees (heap, n);
 			}
 
-			_remove_from_degrees (heap, c);
-			_remove_from_degrees (heap, n);
 
 			current = heap->degree_array[i];
 		}
@@ -437,7 +448,45 @@ void _cut (fibonacci_heap_t *heap, node_t *subroot) {
 
 
 int main () {
+	fibonacci_heap_t *heap = create_fibonacci_heap ();
+	set_compare (_compare_int);
 
+	int d[100];
+	int k[100];
+	int i;
+	for (i = 0; i < 100; i++) {
+		k[i] = i;
+		d[i] = i - 10;
+	}
+
+	for (i = 0; i < 10; i++) {
+		insert (heap, &d[i], &k[i]);
+	}
+
+	//_dot (heap);
+	//_remove_from_roots (heap, heap->root);
+	//_dot (heap);
+
+	// node_t *node = heap->root->right;
+
+	// _remove_from_roots (heap, node);
+	// _insert_into_children (heap->root, node);
+
+	// node = heap->root->right;
+
+	// _remove_from_roots (heap, node);
+	// _insert_into_children (heap->root, node);
+
+	// _remove_from_children (node);
+	// _insert_into_roots (heap, node);
+	// _dot (heap);
+
+
+	delete_min (heap);
+	_dot (heap);
+
+
+	destroy_fibonacci_heap (heap);
 }
 // fibonacci_heap_t *union (fibonacci_heap_t *a, fibonacci_heap_t *b) {
 // 	assert (a != NULL && b != NULL);

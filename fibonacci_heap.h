@@ -17,7 +17,7 @@ typedef struct node_t {
 
 typedef struct degree_node_t {
 	node_t *node;
-	struct degree_node_t *next
+	struct degree_node_t *next;
 } degree_node_t;
 
 typedef struct fibonacci_heap_t {
